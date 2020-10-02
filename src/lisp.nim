@@ -1,7 +1,7 @@
 import strutils, tables, terminal, hashes, sequtils
 
 type
-  NodeKind = enum nkCall, nkNum, nkSym, nkStr, nkProc, nkTable
+  NodeKind = enum nkCall, nkNum, nkSym, nkStr, nkProc, nkTable, nkSeq
   Node = ref object
     case kind: NodeKind
     of nkCall: discard
@@ -10,7 +10,9 @@ type
     of nkSym: symVal: string
     of nkProc: procVal: proc(nodes: seq[Node]): Node
     of nkTable: tableVal: Table[Hash, Node]
+    of nkSeq: seqVal: seq[Node]
     kids: seq[Node]
+    methods: Table[string, proc(args: seq[Node]): Node]
 
 proc newProc(procVal: proc(nodes: seq[Node]): Node): Node =
   result = Node(kind: nkProc, procVal: procVal)
@@ -33,6 +35,8 @@ proc treeRepr(node: Node): string =
     of nkStr: result = '"' & $node.strVal & '"'
     of nkSym: result = $node.symVal
     of nkProc: result = "[ BUILTIN PROC ]"
+    of nkSeq:
+      result = "[ SEQ ]"
     of nkTable:
       result = "[ TABLE ]"
       # result = "{"
@@ -55,12 +59,18 @@ var
 proc eval(node: Node): Node =
   ## Evalues symbols, executes calls, leaves rest untouched...
   case node.kind
-  of nkStr, nkNum, nkProc, nkTable:
+  of nkStr, nkNum, nkProc, nkTable, nkSeq:
     result = node
   of nkCall:
-    let first = eval(node.kids[0])
-    # assert first.kind == nkProc, '\n' & $first.kind & '\n' & first.treeRepr()
-    result = first.procVal(if node.kids.len < 2: @[] else: node.kids[1..^1])
+    let kid0 = node.kids[0].eval()
+    if kid0.kind == nkProc:
+      result = kid0.procVal(if node.kids.len == 1: @[] else: node.kids[1..^1])
+    else:
+      assert node.kids.len > 1
+      let obj = kid0
+      let procName = node.kids[1]
+      let args = if node.kids.len > 2: @[obj] & node.kids[2..^1] else: @[obj]
+      result = obj.methods[procName.symVal](args) # WRONG?
   of nkSym:
     for i in countdown(locals.high, 0):
       if node.symVal in locals[i]:
@@ -70,7 +80,7 @@ proc eval(node: Node): Node =
       if node.symVal in globals:
         result = globals[node.symVal] # I'm not expecting symbols here!
       else:
-        quit "Symbol has no value: " & node.symVal
+        raiseAssert "Undefined symbol: " & node.symVal
     assert result != nil
     assert result.kind != nkSym
 
@@ -141,14 +151,14 @@ proc resetState =
   globals["global"] = newProc proc(nodes: seq[Node]): Node =
     globals[nodes[0].symVal] = nodes[1].eval()
 
-  globals["do"] = newProc proc(nodes: seq[Node]): Node =
-    for i in 0 ..< nodes.high:
-      discard nodes[i].eval()
-    result = nodes[^1].eval()
+  # globals["do"] = newProc proc(nodes: seq[Node]): Node =
+  #   for i in 0 ..< nodes.high:
+  #     discard nodes[i].eval()
+  #   result = nodes[^1].eval()
 
   globals["echo"] = newProc proc(nodes: seq[Node]): Node =
     for n in nodes:
-      echo n.treeRepr()
+      echo n.eval().treeRepr()
 
   globals["join"] = newProc proc(nodes: seq[Node]): Node =
     result = newStr("")
@@ -181,51 +191,95 @@ proc resetState =
       result = outer[^1].eval()
       locals.del locals.high
 
-  globals["table"] = newProc proc(nodes: seq[Node]): Node =
+  globals["newTable"] = newProc proc(nodes: seq[Node]): Node =
     result = Node(kind: nkTable)
     for i in countup(0, nodes.high-1, 2):
       result.tableVal[nodes[i].eval().hash()] = nodes[i+1].eval()
 
-  globals["get"] = newProc proc(nodes: seq[Node]): Node =
-    result = nodes[0].eval().tableVal[nodes[1].eval().hash()]
+    result.methods["get"] = proc(nodes: seq[Node]): Node =
+      result = nodes[0].eval().tableVal[nodes[1].eval().hash()]
 
-  globals["let"] = newProc proc(nodes: seq[Node]): Node =
+    result.methods["set"] = proc(nodes: seq[Node]): Node =
+      nodes[0].eval().tableVal[nodes[1].eval().hash()] = nodes[2].eval()
+
+  globals["newSeq"] = newProc proc(nodes: seq[Node]): Node =
+    result = Node(kind: nkSeq)
+    result.seqVal.setLen nodes.len
+    for i in 0 .. nodes.high:
+      result.seqVal[i] = nodes[i].eval()
+    
+    result.methods["get"] = proc(nodes: seq[Node]): Node =
+      result = nodes[0].eval().seqVal[nodes[1].eval().numVal.int]
+
+    result.methods["set"] = proc(nodes: seq[Node]): Node =
+      nodes[0].eval().seqVal[nodes[1].eval().numVal.int] = nodes[2].eval()
+
+  globals["."] = newProc proc(nodes: seq[Node]): Node =
+    var args = @[nodes[0]]
+    if nodes.len > 2:
+      args.add nodes[2..^1]
+    result = nodes[0].eval().methods[nodes[1].symVal](args)
+
+    # # [ 0       1    2    ]
+    # "(. myTable get 'b')"
+
+  globals["="] = newProc proc(nodes: seq[Node]): Node =
     locals[^1][nodes[0].symVal] = nodes[1].eval()
 
   globals["scope"] = newProc proc(nodes: seq[Node]): Node =
     locals.setLen locals.len+1
-    for n in nodes:
-      discard n.eval()
+    for i in 0 ..< nodes.high:
+      discard nodes[i].eval()
+    result = nodes[^1].eval()
     locals.setLen locals.len-1
 
+  # globals["forEach"] = newProc proc(nodes: seq[Node]): Node =
+    
 template check(a, b) =
   assert a == b, $a
 
 resetState()
 check "(+ 2 3)".parse().eval().numVal, 5
 check "(+ (+ 1 1) 3)".parse().eval().numVal, 5
-check "(do (global x 2) (global y 3) (+ x y))".parse().eval().numVal, 5
+check "(scope (scope (global x 2) (global y 3)) (+ x y)".parse().eval().numVal, 5
 check """(join "foo" "bar" "baz")""".parse().eval().strVal, "foobarbaz"
-check "(scope (let a 1) (let b 2) (+ a b))".parse().eval().numVal, 3
-# check "(+ (let a 1 b 2 (+ a b)) (let a 10 b 20 (+ a b)))".parse().eval().numVal, 33
-# check "(let a 5 (+ (let a 10 (+ a 1)) a))".parse().eval().numVal, 16
-# check "((func x y (+ x y)) 1 2)".parse().eval().numVal, 3
-# check "(let localFoo (func x y (+ x y)) (localFoo 1 2))".parse().eval().numVal, 3
-# check "(do (global globalFoo (func x y (+ x y))) (globalFoo 1 2))".parse().eval().numVal, 3
-# assert "(let myTable (table 'a' 1 'b' 2 'c' 3))".parse().eval() == nil
-# check "(get myTable 'a')".parse().eval().numVal, 1
-# check "(get myTable 'b')".parse().eval().numVal, 2
-# check "(get myTable 'c')".parse().eval().numVal, 3
+check "(scope (= a 1) (= b 2) (+ a b))".parse().eval().numVal, 3
+check "(+ (scope (= a 1) (= b 2) (+ a b)) (scope (= a 10) (= b 20) (+ a b)))".parse().eval().numVal, 33
+check "(scope (= a 5) (+ (scope (= a 10) (+ a 1)) a))".parse().eval().numVal, 16
+check "((func x y (+ x y)) 1 2)".parse().eval().numVal, 3
+check "(scope (= localFoo (func x y (+ x y))) (localFoo 1 2))".parse().eval().numVal, 3
+check "(scope (scope (global globalFoo (func x y (+ x y)))) (globalFoo 1 2))".parse().eval().numVal, 3
+discard "(= myTable (newTable 'a' 1 'b' 2 'c' 3))".parse().eval()
+check "(myTable get 'a')".parse().eval().numVal, 1
+check "(myTable get 'b')".parse().eval().numVal, 2
+check "(myTable get 'c')".parse().eval().numVal, 3
+discard "(myTable set 'c' 123)".parse().eval()
+check "(myTable get 'c')".parse().eval().numVal, 123
+discard "(= mySeq (newSeq 'foo' 'bar' 'baz'))".parse().eval()
+check "(mySeq get 0)".parse().eval().strVal, "foo"
+check "(mySeq get 1)".parse().eval().strVal, "bar"
+check "(mySeq get 2)".parse().eval().strVal, "baz"
+discard "(mySeq set 2 'foobarbaz')".parse().eval()
+check "(mySeq get 2)".parse().eval().strVal, "foobarbaz"
+
+check "+ 2 3".parse().eval().numVal, 5
 
 resetState()
 stdout.styledWriteLine styleBright, fgYellow, "REPL ready"
 var buf: string
 while true:
-  buf.add (try: stdin.readLine() except EOFError: break)
-  var open, close = 0
-  for ch in buf:
-    if ch == '(': inc open
-    else: inc close
-  if close >= open:
-    stdout.styledWriteLine styleBright, fgBlue, buf.parse().eval().treeRepr()
-    buf = ""
+  stdout.styledWrite fgGreen, ">> "
+  let input = try: stdin.readLine() except EOFError: break
+  if input != "":
+    buf.add input
+    var open, close = 0
+    for ch in buf:
+      if ch == '(': inc open
+      else: inc close
+    if close >= open:
+      try:
+        let result = buf.parse().eval()
+        stdout.styledWriteLine styleBright, fgBlue, result.treeRepr()
+      except Exception as err:
+        stderr.styledWriteLine styleBright, fgRed, "ERROR", resetStyle, " ", err.msg
+      buf = ""
