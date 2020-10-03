@@ -1,7 +1,7 @@
 import strutils, tables, terminal, hashes, sequtils
 
 type
-  NodeKind = enum nkCall, nkNum, nkSym, nkStr, nkProc, nkTable, nkSeq
+  NodeKind = enum nkCall, nkNum, nkSym, nkStr, nkProc, nkTable, nkSeq, nkBool
   Node = ref object
     case kind: NodeKind
     of nkCall: discard
@@ -11,6 +11,7 @@ type
     of nkProc: procVal: proc(nodes: seq[Node]): Node
     of nkTable: tableVal: Table[Hash, Node]
     of nkSeq: seqVal: seq[Node]
+    of nkBool: boolVal: bool
     kids: seq[Node]
     methods: Table[string, proc(args: seq[Node]): Node]
 
@@ -232,8 +233,12 @@ proc resetState =
       discard nodes[i].eval()
     result = nodes[^1].eval()
     locals.setLen locals.len-1
-
-  # globals["forEach"] = newProc proc(nodes: seq[Node]): Node =
+  
+  # globals["while"] = newProc proc(nodes: seq[Node]): Node =
+  #   locals.setLen local.len+1
+  #   while nodes[0].eval().boolVal:
+  #     discard nodes[1].eval()
+  #   locals.setLen local.len-1
     
 template check(a, b) =
   assert a == b, $a
